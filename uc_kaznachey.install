@@ -1,0 +1,55 @@
+<?php
+// $Id$
+
+/**
+ * @file
+ * Kaznachey payment gateway install file.
+ *
+ * This module installs a uc_kaznachey module
+ */
+
+/**
+ * Implementation of hook_schema().
+ */
+function uc_kaznachey_schema() {
+  $schema['uc_kaznachey_transaction'] = array(
+    'description' => t('TODO'),
+    'fields' => array(
+      'txnid' => array(
+        'description' => t('TODO'),
+        'type' => 'int',
+        'unsigned' => 1,
+        'not null' => TRUE,
+        'default' => 0,
+      ),
+      'amount' => array(
+        'description' => t('TODO'),
+        'type' => 'numeric',
+        'precision' => 6,
+        'scale' => 2,
+        'not null' => TRUE,
+        'default' => 0.00,
+      ),
+      'description' => array(
+        'description' => t('TODO'),
+        'type' => 'text',
+        'not null' => FALSE,
+      ),
+    ),
+    'primary key' => array('txnid'),
+  );
+
+  return $schema;
+}
+
+function uc_kaznachey_install() {
+  // Create tables.
+  drupal_install_schema('uc_kaznachey');
+  drupal_set_message(t('Ubercart: Kaznachey tables have been created.'));
+}
+
+function uc_kaznachey_uninstall() {
+  // Remove tables.
+  drupal_uninstall_schema('uc_kaznachey');
+}
+

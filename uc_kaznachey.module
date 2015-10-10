@@ -1,0 +1,543 @@
+<?php
+// $Id$
+
+global $urlGetMerchantInfo, $urlGetClientMerchantInfo;
+$urlGetMerchantInfo = 'http://payment.kaznachey.net/api/PaymentInterface/CreatePayment';
+$urlGetClientMerchantInfo = 'http://payment.kaznachey.net/api/PaymentInterface/GetMerchatInformation';
+
+/********************************************************************
+ * Drupal Hooks
+ ********************************************************************/
+
+/**
+ * Implementation of hook_menu()
+ */
+function uc_kaznachey_menu() 
+{
+
+	$items['uc_kaznachey/pay'] = array(
+      'title'    => 'Kaznachey processing',
+      'page callback' => 'uc_kaznachey_do_payment',
+      'page arguments' => array('success'),
+      'access arguments'   => array('access content'),
+      'callback arguments' => array('success'),
+      'type'     => MENU_CALLBACK
+    );
+	
+	$items['uc_kaznachey/done'] = array(
+      'title'    => 'Kaznachey processing',
+      'page callback' => 'uc_kaznachey_done_payment',
+      'page arguments' => array('success'),
+      'access arguments'   => array('access content'),
+      'callback arguments' => array('success'),
+      'type'     => MENU_CALLBACK
+    );
+	
+    $items['uc_kaznachey/success'] = array(
+      'title'    => 'Kaznachey processing',
+      'page callback' => 'uc_kaznachey_payment_end',
+      'page arguments' => array('success'),
+      'access arguments'   => array('access content'),
+      'callback arguments' => array('success'),
+      'type'     => MENU_CALLBACK
+    );
+	
+    $items['uc_kaznachey/fail'] = array(
+      'title'    => 'Kaznachey processing',
+      'page callback' => 'uc_kaznachey_payment_end',
+      'page arguments' => array('fail'),
+      'access arguments'   => array('access content'),
+      'callback arguments' => array('fail'),
+      'type'     => MENU_CALLBACK
+    );
+  return $items;
+}
+
+
+/**
+ * Implementation of hook_form_alter().
+ */
+function uc_kaznachey_form_alter(&$form, &$form_state, $form_id) 
+{
+  if ($form_id == 'uc_cart_checkout_review_form' && ($order_id = intval($_SESSION['cart_order'])) > 0) 
+  {
+    $order = uc_order_load($order_id);
+
+    if ($order->payment_method == 'uc_kaznachey') 
+    {
+      unset($form['submit']);
+      $form['#prefix'] = '<table><tr><td>';
+      $form['#suffix'] = '</td><td>'. drupal_get_form('uc_kaznachey_submit_form', $order) .'</td></tr></table>';
+    }
+  }
+}
+
+/********************************************************************
+ * Functions callback
+ ********************************************************************/
+
+
+ /**
+ *  Cоздание транзакции, генерирование url оплаты
+ */
+function uc_kaznachey_do_payment()
+{
+	
+	$currency_to_uah  = variable_get('currency_to_uah', '1');
+ 
+	if (($order_id = intval($_SESSION['cart_order'])) > 0)
+    $order = uc_order_load($order_id);
+
+	$amount = number_format(round($order->order_total * $currency_to_uah, 2), 2, '.', '');
+
+	$description=serialize($ser);
+	if (db_result(db_query("SELECT COUNT(txnid) FROM {uc_kaznachey_transaction} WHERE txnid = '%s'", $order->order_id))) {
+		db_query("UPDATE {uc_kaznachey_transaction} SET description = '%s' WHERE txnid = %d", $description, $order->order_id);
+	}
+	else {
+		db_query("INSERT INTO {uc_kaznachey_transaction} (txnid, description) VALUES (%d, '%s')", $order->order_id, $description);
+	}
+
+	// получаем e-mail покупателя
+    global $user, $urlGetMerchantInfo;
+   
+	$user_email = (@$user->mail) ? $user->mail : $order->primary_email;
+	$user_id = (@$user->uid) ? $user->uid : 1 ;
+	
+    // получаем настройки оплаты
+    $order_id = $order->order_id;
+    $sum = $amount;
+    $sum = round($sum, 2);
+    $path = 'http://' . $_SERVER['HTTP_HOST'] . '/';
+    $path_success = url('uc_kaznachey/success', array('absolute' => true));
+    $path_fail = url('uc_kaznachey/fail', array('absolute' => true));
+    $path_done = url('uc_kaznachey/done', array('absolute' => true));
+    
+	$selectedPaySystemId = $_SESSION['sesccdata']['cc_type'] ? $_SESSION['sesccdata']['cc_type'] : 1;
+	unset($_SESSION['sesccdata']);
+   
+	$merchantGuid = variable_get('merchantGuid', '');
+    $merchnatSecretKey  = variable_get('merchnatSecretKey', '');
+	
+	$i = 0;
+	$amount2 = 0;
+	foreach ($order->products as $key=>$pr_item)
+	{
+		$node = node_load(array("nid" => $pr_item->nid));
+				
+		$products[$i]['ProductItemsNum'] = number_format($pr_item->qty, 2, '.', ''); 			// Колличество
+		$products[$i]['ProductName'] = $pr_item->title;				// Наименование товара
+		$products[$i]['ProductPrice'] = number_format(round($pr_item->price * $currency_to_uah, 2), 2, '.', '');
+		$products[$i]['ProductId'] = $pr_item->model;				// Идентификатор товара из системы мерчанта. Необходим для аналити продаж 
+		$products[$i]['ImageUrl'] = file_create_url($node->uc_product_image['und'][0]['uri']);
+		$amount2 += $products[$i]['ProductPrice'] * $pr_item->qty;
+		$i++;
+	}
+	
+	$amount2  = number_format($amount2, 2, '.', '');
+	if($amount != $amount2)
+	{
+		$tt = $amount - $amount2; 
+		$products[$i]['ProductItemsNum'] = '1.00';
+		$products[$i]['ProductName'] = t('Доставка или скидка');
+		$products[$i]['ProductPrice'] = number_format(round($tt * $currency_to_uah, 2), 2, '.', '');
+		$products[$i]['ProductId'] = '00001'; 
+		$pr_c = '1.00';
+		$amount2  = number_format($amount2 + $tt, 2, '.', '');
+	}
+	
+	$product_count = number_format($order->product_count, 2, '.', '');
+	
+	$signature_u = md5(md5(
+		$merchantGuid.
+		$merchnatSecretKey.
+		"$amount".
+		"$product_count".
+		$order_id
+	));
+	
+	$DeliveryFirstname	= (@$order->delivery_first_name) ? $order->delivery_first_name : 1;
+	$DeliveryLastname	= (@$order->delivery_last_name) ? $order->delivery_last_name : 1;
+	$DeliveryZip		= (@$order->delivery_postal_code) ? $order->delivery_postal_code : 1 ;
+	$DeliveryCountry	= (@$order->delivery_country) ? $order->delivery_country : 1 ;
+	$DeliveryPatronymic	= '1';
+	$DeliveryStreet		= (@$order->delivery_street1) ? $order->delivery_street1 : 1 ;
+	$DeliveryCity		= (@$order->delivery_city) ? $order->delivery_city : 1 ;
+	$DeliveryZone		= (@$order->delivery_zone) ? $order->delivery_zone : 0 ;
+
+	$BuyerCountry 		= (@$order->billing_country) ? $order->billing_country : $DeliveryCountry;
+	$BuyerFirstname 	= (@$order->billing_first_name) ? $order->billing_first_name : $DeliveryFirstname;
+	$BuyerPatronymic 	= '1';
+	$BuyerLastname		= (@$order->billing_last_name) ? $order->billing_last_name : $DeliveryLastname;
+	$BuyerStreet		= (@$order->billing_street1) ? $order->billing_street1 : $DeliveryStreet;
+	$BuyerZone			= (@$order->billing_zone) ? $order->billing_zone : $DeliveryZone;
+	$BuyerZip			= (@$order->billing_postal_code) ? $order->billing_postal_code : $DeliveryZip;
+	$BuyerCity			= (@$order->billing_city) ? $order->billing_city : $DeliveryCity;
+
+	
+		//Детали платежа
+    $paymentDetails = Array(
+       "EMail"=>"$user_email",
+       "PhoneNumber"=>"$order->delivery_phone",
+       "MerchantInternalPaymentId"=>"$order_id",// Номер платежа в системе мерчанта
+       "MerchantInternalUserId"=>"$user_id", //Номер пользователя в системе мерчанта
+       "CustomMerchantInfo"=>"$signature_u",// Любая информация
+       "StatusUrl"=>"$path_done",// url состояния
+       "ReturnUrl"=>"$path_success",//url возврата 
+       "BuyerCountry"=>"$BuyerCountry",//Страна
+       "BuyerFirstname"=>"$BuyerFirstname",//Имя,
+       "BuyerPatronymic"=>"$BuyerPatronymic",// отчество
+       "BuyerLastname"=>"$BuyerLastname",//Фамилия
+       "BuyerStreet"=>"$BuyerStreet",// Адрес
+       "BuyerZone"=>"$BuyerZone",//   Область
+       "BuyerZip"=>"$BuyerZip",//  Индекс
+       "BuyerCity"=>"$BuyerCity",//   Город,
+        // аналогичная информация о доставке
+       "DeliveryFirstname"=>"$DeliveryFirstname",// 
+       "DeliveryLastname"=>"$DeliveryLastname",//
+       "DeliveryZip"=>"$DeliveryZip",//     
+       "DeliveryCountry"=>"$DeliveryCountry",//   
+       "DeliveryPatronymic"=>"$DeliveryPatronymic",//
+       "DeliveryStreet"=>"$DeliveryStreet",//   
+       "DeliveryCity"=>"$DeliveryCity",//      ,
+       "DeliveryZone"=>"$DeliveryZone",//      0,
+    );
+
+	$product_count = (@$pr_c) ? $order->product_count + $pr_c : $order->product_count;
+	$product_count = number_format($product_count, 2, '.', '');	
+	
+	$signature = md5(
+		$merchantGuid.
+		"$amount2".//Общяя сумма
+		"$product_count".//количество товара
+		$paymentDetails["MerchantInternalUserId"].
+		$paymentDetails["MerchantInternalPaymentId"].
+		$selectedPaySystemId.
+		$merchnatSecretKey
+	);	
+	
+	$request = Array(
+        "SelectedPaySystemId"=>$selectedPaySystemId,//Выбранная платёжная система
+        "Products"=>$products,// Продукты
+        "PaymentDetails"=>$paymentDetails, //Детали платежа
+        "Signature"=>$signature,
+        "MerchantGuid"=>$merchantGuid,
+		"Currency"=>'UAH'
+    );
+	
+	$res = sendRequestKaznachey($urlGetMerchantInfo, json_encode($request));
+
+	$result = json_decode($res,true);
+
+	if($result['ErrorCode'] != 0)
+	{
+		drupal_goto('uc_kaznachey/fail');
+	}
+	
+	uc_cart_empty(uc_cart_get_id());
+	
+	return base64_decode($result["ExternalForm"]);
+	
+}
+
+/**
+ *  Kaznachey API
+ */
+function uc_kaznachey_done_payment()
+{
+$HTTP_RAW_POST_DATA = @$HTTP_RAW_POST_DATA ? $HTTP_RAW_POST_DATA : file_get_contents('php://input');
+
+$hrpd = json_decode($HTTP_RAW_POST_DATA);
+
+if(@$hrpd->MerchantInternalPaymentId)
+{
+		$order_id = intval($hrpd->MerchantInternalPaymentId); 
+		$data = db_query("SELECT * FROM {uc_kaznachey_transaction} WHERE txnid = :txnid", array(':txnid'=>$order_id) )->fetchObject();
+		$un = unserialize($data->description);
+		$order = uc_order_load($order_id);
+		$currency_to_uah  = variable_get('currency_to_uah', '1');
+		$amount = number_format(round($order->order_total * $currency_to_uah, 2), 2, '.', '');
+		$product_count = number_format($order->product_count, 2, '.', '');
+		$res = "";
+		
+	$merchantGuid = variable_get('merchantGuid', '');
+    $merchnatSecretKey  = variable_get('merchnatSecretKey', '');
+
+		
+	$signature_u = md5(md5(
+		$merchantGuid.
+		$merchnatSecretKey.
+		"$amount".
+		"$product_count".
+		$order_id
+	));
+		
+	if($hrpd->ErrorCode == 0)
+	{
+		if($hrpd->CustomMerchantInfo == $signature_u)
+		{
+				// зачисляем платеж
+			$description = t('Платеж от kaznachey.ua принят.');
+			uc_payment_enter($order_id, 'uc_kaznachey', $order->order_total, $order->uid, null, $description);
+			uc_order_comment_save($order_id, 0, $description, 'admin');
+			//uc_cart_complete_sale($order);
+			uc_order_update_status($order_id, variable_get('kaznachey_status_pending', ''));
+		}else{
+			$res = t('Подпись неверна. Транзакция отменена');
+			// произошла ошибка, не разрешаем платеж
+			uc_order_comment_save($order_id, 0, $res, 'admin');
+			watchdog('kaznacheyerror', '@res', array('@res'=>$res));
+		}
+
+	}else{
+		$res = t('Транзакция отменена.');
+			// произошла ошибка, не разрешаем платеж
+		uc_order_comment_save($order_id, 0, $res, 'admin');
+		watchdog('kaznacheyerror', '@res', array('@res'=>$res));
+		//uc_order_update_status($order_id, 'pending');
+	}
+
+}else{
+	watchdog('kaznacheyerror', '@res', array('@res'=>'Отсутвует ID транзакции'));
+}
+  
+}
+
+function uc_kaznachey_payment_end($type) 
+{
+	if($_REQUEST['Result'] == 'success')
+	{
+		if (isset($_SESSION['cart_order'])) 
+		{
+			$order_id=$_SESSION['cart_order'];
+			$_SESSION['do_complete'] = TRUE;
+			drupal_goto('cart/checkout/complete');
+		}
+	}
+	else{
+		unset($_SESSION['cart_order']);
+		drupal_set_message( t("Your payment has been declined."));
+		drupal_goto('cart');
+	}
+	return $output;
+}
+
+/********************************************************************
+ * other Functions
+ ********************************************************************/
+function uc_payment_method_Kaznachey($op, &$arg1) 
+{
+  switch ($op) {
+	case 'cart-details':
+			$details = drupal_get_form('uc_payment_method_kaznachey_form', $arg1);
+		return uc_strip_form($details);
+
+    case 'settings':
+	  $form['merchantGuid'] = array(
+		'#type'          => 'textfield',
+		'#title'         => t('Kaznachey merchantGuid'),
+		'#default_value' => variable_get('merchantGuid', ''),
+		'#description'   => t("Идентификатор мерчанта")
+	  );  
+	  
+	  $form['merchnatSecretKey'] = array(
+		'#type'          => 'textfield',
+		'#title'         => t('Kaznachey merchnatSecretKey'),
+		'#default_value' => variable_get('merchnatSecretKey', ''),
+		'#description'   => t("Секретный ключ мерчанта")
+	  ); 	
+	  
+	  $form['currency_to_uah'] = array(
+		'#type'          => 'textfield',
+		'#title'         => t('Курс валюты'),
+		'#default_value' => variable_get('currency_to_uah', '1'),
+		'#description'   => t("Курс валюты по умолчанию к грн. (=1 если основная валюта - гривна)")
+	  ); 
+
+		$form['kaznachey_currency'] = array(
+		  '#type' => 'select', 
+		  '#title' => t('Валюта оплаты'), 
+		  '#default_value' => variable_get('kaznachey_currency','UAH'),
+		  '#options' => array(
+			'UAH' => t('UAH'), 
+			'USD' => t('USD'), 
+			'EUR' => t('EUR'), 
+			'RUB' => t('RUB'), 
+		  ),
+		  '#description' => t('Валюта в которой совершается оплата заказа'),
+		);	
+		
+	  $form['kaznachey_status_pending'] = array(
+		  '#type' => 'select', 
+		  '#title' => t('Статус заказа'), 
+		  '#default_value' => variable_get('kaznachey_status_pending','pending'),
+		  '#options' => array(
+			'canceled' => t('Canceled'), 
+			'in_checkout' => t('In checkout'), 
+			'pending' => t('Pending'), 
+			'processing' => t('Processing'), 
+			'payment_received' => t('Payment received'), 
+			'completed' => t('Completed'), 
+		  ),
+		  '#description' => t('Статус после успешной оплаты'),
+		);
+
+    return $form;
+	  
+		case 'cart-process':
+
+		$cc_type = $_POST['cc_type'];
+		$_SESSION['sesccdata']['cc_type'] = $cc_type;
+
+		if($_POST['cc_agreed'] != 1)
+		{
+			form_set_error('panes][payment][details][cc_agreed', t('Вы должны быть согласны с условиями договора'));
+			$return = FALSE;
+		}
+		
+		return;
+  }
+}
+
+function sendRequestKaznachey($url,$data)
+{
+	$curl =curl_init();
+	if (!$curl)
+		return false;
+
+	curl_setopt($curl, CURLOPT_URL,$url );
+	curl_setopt($curl, CURLOPT_POST,true);
+	curl_setopt($curl, CURLOPT_HTTPHEADER, 
+			array("Expect: ","Content-Type: application/json; charset=UTF-8",'Content-Length: ' 
+				. strlen($data)));
+	curl_setopt($curl, CURLOPT_POSTFIELDS,$data);
+	curl_setopt($curl, CURLOPT_RETURNTRANSFER,True);
+	$res =  curl_exec($curl);
+	curl_close($curl);
+
+	return $res;
+}
+
+function GetMerchnatInfo($id = false)
+{
+	global $urlGetClientMerchantInfo;
+    // Ссылка для получения информации о клиенте
+	$merchantGuid = variable_get('merchantGuid', '');
+    $merchnatSecretKey  = variable_get('merchnatSecretKey', '');
+
+    $requestMerchantInfo = Array(
+        "MerchantGuid"=>$merchantGuid,
+        "Signature"=>md5($merchantGuid.$merchnatSecretKey)
+    );
+
+    $resMerchantInfo = json_decode(sendRequestKaznachey($urlGetClientMerchantInfo , json_encode($requestMerchantInfo)),true); 
+	
+	if($id)
+	{
+		foreach ($resMerchantInfo["PaySystems"] as $key=>$paysystem)
+		{
+			if($paysystem['Id'] == $id)
+			{
+				return $paysystem;
+			}
+		}
+	}else{
+		return $resMerchantInfo;
+	}
+}
+
+function uc_kaznachey_submit_form(&$form_state, $order)
+{
+	$form = array();
+		$form['#action'] = url('uc_kaznachey/pay', array('absolute' => true));
+		$form['submit'] = array(
+			'#type' => 'submit',
+			'#value' => t('Submit Order'), 
+		);
+	return $form;
+}
+
+
+/********************************************************************
+ * Hook Functions (Ubercart)
+ ********************************************************************/
+
+/**
+ * Implementation of hook_payment_method().
+ */
+function uc_kaznachey_payment_method() 
+{
+  $path = base_path().drupal_get_path('module', 'uc_kaznachey');
+  $title =  t('Кредитная карта Visa/MC, Webmoney, Liqpay, Qiwi... (www.kaznachey.ua)');
+  $title_long = $title . '<br /><img src="' . $path .
+        '/images/kaznachey_logo.png" class="kaznachey_logo" style="position: relative; left: 2.5em; width: 150px;">';
+
+  $methods[] = array(
+    'id' => 'uc_kaznachey',
+    'name' => t('Kaznachey'),
+    'title' => $title,
+    'desc' => t('Redirect to Kaznachey.ua'),
+    'callback' => 'uc_payment_method_Kaznachey',
+    'weight' => 3,
+    'checkout' => TRUE,
+    'no_gateway' => TRUE,
+  );
+
+  return $methods;
+}
+
+
+/**
+ * Displays the credit card details form on the checkout screen.
+ */
+function uc_payment_method_kaznachey_form($form_state, $order) {
+
+	$cc_types = GetMerchnatInfo();
+	if($cc_types)
+	{
+		foreach ($cc_types["PaySystems"] as $paysystem)
+		{
+			$PaySystems[$paysystem['Id']] = $paysystem['PaySystemName'];
+		}
+	}
+	if($PaySystems)
+	{
+		$term_url = GetTermToUse();
+	
+		$form['cc_type'] = array(
+			'#type' => 'select',
+			'#title' => t('Выберите способ оплаты'),
+			'#options' => $PaySystems,
+			'#default_value' => 1,
+		);
+		
+		$form['cc_agreed'] = array(
+			'#type' => 'checkbox',
+			'#title' => t("<a href='$term_url' target='_blank' >Согласен с условиями использования</a>"),
+			'#default_value' => 1,
+		);
+	}
+
+		$form['policy'] = array(
+			'#markup' => '<p>' . variable_get('uc_check_policy', '') . '</p>',
+		);
+		  
+	return $form;
+}
+
+function GetTermToUse()
+{
+	global $urlGetClientMerchantInfo;
+	$merchantGuid = variable_get('merchantGuid', '');
+    $merchnatSecretKey  = variable_get('merchnatSecretKey', '');
+
+    $requestMerchantInfo = Array(
+        "MerchantGuid"=>$merchantGuid,
+        "Signature"=>md5($merchantGuid.$merchnatSecretKey)
+    );
+
+    $resMerchantInfo = json_decode(sendRequestKaznachey($urlGetClientMerchantInfo , json_encode($requestMerchantInfo)),true); 
+
+	return $resMerchantInfo["TermToUse"];
+
+}
